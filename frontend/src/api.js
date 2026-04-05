@@ -1,10 +1,9 @@
 import axios from 'axios';
 
-const BASE = 'http://localhost:8000';
-
+const BASE = 'http://127.0.0.1:8000';
 export const api = {
-  scan: (hosts, port = 443) =>
-    axios.post(`${BASE}/scan`, { hosts, port }).then(r => r.data),
+  scan: (hosts, signal) =>
+    axios.post(`${BASE}/scan`, { hosts }, { signal }).then(r => r.data),
 
   getAssets: () =>
     axios.get(`${BASE}/assets`).then(r => r.data),

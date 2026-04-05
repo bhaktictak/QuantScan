@@ -7,6 +7,7 @@ export default function ScanModal({ onClose, onDone }) {
   const [progress, setProgress] = useState(0);
   const [current, setCurrent]   = useState('');
   const [results, setResults]   = useState(null);
+  const [subdomainResults, setSubdomainResults] = useState(null);
   const [error, setError]       = useState('');
 
   const handleScan = async () => {
@@ -32,7 +33,10 @@ export default function ScanModal({ onClose, onDone }) {
     }, 250);
 
     try {
-      const data = await api.scan(hosts);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 120000);
+      const data = await api.scan(hosts, controller.signal);
+      clearTimeout(timeout);
       clearInterval(interval);
       setProgress(100);
       setCurrent('Scan complete!');
@@ -47,6 +51,33 @@ export default function ScanModal({ onClose, onDone }) {
         'python -m uvicorn main:app --reload'
       );
     }
+  };
+
+  const handleSubdomainScan = async () => {
+  if (!input.trim()) {
+    setError('Please enter a domain');
+    return;
+  }
+
+  setScanning(true);
+  setError('');
+  setSubdomainResults(null);
+
+  try {
+    const response = await fetch("http://127.0.0.1:8000/scan-subdomains", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host: input.trim() })
+    });
+
+    const data = await response.json();
+    setScanning(false);
+    setSubdomainResults(data);  // ✅ save results to state
+
+  } catch (err) {
+    setScanning(false);
+    setError('Cannot connect to backend. Make sure uvicorn is running:\npython -m uvicorn main:app --reload');
+  }
   };
 
   return (
@@ -96,6 +127,41 @@ export default function ScanModal({ onClose, onDone }) {
               onFocus={e => e.target.style.borderColor = '#8b0000'}
               onBlur={e  => e.target.style.borderColor = '#e0d8d0'}
             />
+            {subdomainResults && (
+  <div style={{
+    marginBottom: '12px',
+    background: '#f0f8ff',
+    border: '1px solid #c0d8f0',
+    borderRadius: '8px',
+    padding: '12px 14px',
+    maxHeight: '200px',
+    overflowY: 'auto',
+  }}>
+    <div style={{ fontWeight: 700, color: '#8b0000', marginBottom: '8px', fontSize: '13px' }}>
+       Found {subdomainResults.subdomains.length} subdomains for {subdomainResults.host}
+    </div>
+    {subdomainResults.subdomains.length === 0 ? (
+      <div style={{ color: '#888', fontSize: '12px' }}>No subdomains found</div>
+    ) : (
+      subdomainResults.subdomains.map((sub, i) => (
+        <div key={i} style={{
+          fontSize: '12px',
+          color: '#333',
+          padding: '4px 0',
+          borderBottom: '1px solid #e0eef8',
+          fontFamily: 'monospace',
+        }}>
+          {sub}
+          {subdomainResults.subdomain_ports[sub]?.open_ports?.length > 0 && (
+            <span style={{ color: '#888', marginLeft: '8px' }}>
+              ({subdomainResults.subdomain_ports[sub].open_ports.join(', ')})
+            </span>
+          )}
+        </div>
+      ))
+    )}
+  </div>
+)}
 
             {error && (
               <div style={{
@@ -154,6 +220,28 @@ export default function ScanModal({ onClose, onDone }) {
               >
                 <span>▶</span> Start Scan
               </button>
+
+              <button onClick={handleSubdomainScan}
+                style={{
+                  padding: '9px 24px',
+                  background: 'linear-gradient(135deg, #8b0000, #c0392b)',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '8px',
+                  fontSize: '13px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  boxShadow: '0 4px 14px rgba(139,0,0,0.3)',
+                  transition: 'opacity 0.15s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.opacity = '0.9'}
+                onMouseLeave={e => e.currentTarget.style.opacity = '1'}
+              >
+               Scan Subdomains
+               </button>
             </div>
           </>
         ) : (

@@ -75,12 +75,24 @@ def save_to_db(data: dict, db: Session):
 
 # ── ROUTES ─────────────────────────────────────────────────────────────────
 
+# scanning the link subdomain
+
+from scanner import scan_with_subdomains
+
+class SubdomainRequest(BaseModel):
+    host: str
+
+@app.post("/scan-subdomains")
+def scan_subdomains_api(req: SubdomainRequest):
+    return scan_with_subdomains(req.host)
+
 # 1. Health check
 @app.get("/")
 def root():
     return {"status": "QuantScan API running", "version": "1.0.0"}
 
 # 2. Scan one or multiple hosts
+
 @app.post("/scan")
 def scan(request: ScanRequest, db: Session = Depends(get_db)):
     results = []
@@ -88,17 +100,18 @@ def scan(request: ScanRequest, db: Session = Depends(get_db)):
 
     for host in request.hosts:
         host = host.strip().lower()
-        # Remove https:// or http:// if user typed it
         host = host.replace("https://", "").replace("http://", "").split("/")[0]
 
+        # ✅ Just scan the entered host directly — no subdomain expansion
         print(f"🔍 Scanning {host}...")
-        data = scan_host(host, request.port)
+        data = scan_host(host)
 
         if data.get("error"):
             errors.append({"host": host, "error": data["error"]})
         else:
             record = save_to_db(data, db)
             results.append(format_result(record))
+       
 
     return {
         "message": f"Scanned {len(results)} hosts successfully",
