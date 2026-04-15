@@ -25,8 +25,10 @@ function Layout({ children }) {
 }
 
 function Protected({ children }) {
+  const token = localStorage.getItem('qs_token');
   const auth = localStorage.getItem('qs_auth');
-  return auth ? children : <Navigate to="/" replace />;
+  // Valid if we have either the new token or the legacy flag
+  return (token || auth) ? children : <Navigate to="/" replace />;
 }
 
 export default function App() {
