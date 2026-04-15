@@ -1,13 +1,13 @@
-from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from typing import List, Optional
 import json
+import base64
 from datetime import datetime
 from dateutil import parser as dateparser
-from database import get_db, create_tables, ScanResult
-from scanner import scan_host
+from database import get_db, create_tables, ScanResult, User, hash_password, verify_password
 
 # ── App setup ──────────────────────────────────────────────────────────────
 app = FastAPI(title="QuantScan API", version="1.0.0")
@@ -24,10 +24,186 @@ app.add_middleware(
 @app.on_event("startup")
 def startup():
     create_tables()
-    print("✅ QuantScan API is running!")
-    print("📖 Docs at: http://localhost:8000/docs")
+    print("[OK] QuantScan API is running!")
+    print("[DOCS] Docs at: http://localhost:8000/docs")
 
-# ── Request/Response models ────────────────────────────────────────────────
+# ── Auth Request/Response models ───────────────────────────────────────────
+class RegisterRequest(BaseModel):
+    username: str
+    email: str
+    full_name: str
+    password: str
+    security_question: str
+    security_answer: str
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class ResetPasswordRequest(BaseModel):
+    username: str
+    security_answer: str
+    new_password: str
+
+# ── Auth helper: create simple token ───────────────────────────────────────
+def create_token(user: User) -> str:
+    """Create a simple base64-encoded token with user info."""
+    payload = json.dumps({
+        "user_id": user.id,
+        "username": user.username,
+        "role": user.role,
+    })
+    return base64.b64encode(payload.encode()).decode()
+
+def decode_token(token: str) -> dict:
+    """Decode a base64 token back to user info."""
+    try:
+        payload = base64.b64decode(token.encode()).decode()
+        return json.loads(payload)
+    except Exception:
+        return None
+
+# ── AUTH ROUTES ────────────────────────────────────────────────────────────
+
+@app.post("/auth/register")
+def register(req: RegisterRequest, db: Session = Depends(get_db)):
+    # Validate input
+    if len(req.username) < 3:
+        raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
+    if len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    if not req.email or "@" not in req.email:
+        raise HTTPException(status_code=400, detail="Invalid email address")
+    if len(req.full_name.strip()) < 2:
+        raise HTTPException(status_code=400, detail="Full name is required")
+    if not req.security_question or not req.security_answer:
+        raise HTTPException(status_code=400, detail="Security question and answer are required")
+
+    # Check if username already exists
+    existing_user = db.query(User).filter(User.username == req.username.lower()).first()
+    if existing_user:
+        raise HTTPException(status_code=409, detail="Username already taken")
+
+    # Check if email already exists
+    existing_email = db.query(User).filter(User.email == req.email.lower()).first()
+    if existing_email:
+        raise HTTPException(status_code=409, detail="Email already registered")
+
+    # Hash password and security answer
+    pwd_hash, pwd_salt = hash_password(req.password)
+    ans_hash, ans_salt = hash_password(req.security_answer.lower().strip())
+
+    user = User(
+        username=req.username.lower().strip(),
+        email=req.email.lower().strip(),
+        full_name=req.full_name.strip(),
+        password_hash=pwd_hash,
+        password_salt=pwd_salt,
+        role="analyst",
+        security_question=req.security_question,
+        security_answer_hash=ans_hash,
+        security_answer_salt=ans_salt,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    token = create_token(user)
+    return {
+        "message": "Account created successfully",
+        "token": token,
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "full_name": user.full_name,
+            "role": user.role,
+        }
+    }
+
+@app.post("/auth/login")
+def login(req: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == req.username.lower().strip()).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    if not verify_password(req.password, user.password_hash, user.password_salt):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    # Update last login
+    user.last_login = datetime.utcnow()
+    db.commit()
+
+    token = create_token(user)
+    return {
+        "message": "Login successful",
+        "token": token,
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "full_name": user.full_name,
+            "role": user.role,
+        }
+    }
+
+@app.post("/auth/reset-password")
+def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
+    if len(req.new_password) < 6:
+        raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
+
+    user = db.query(User).filter(User.username == req.username.lower().strip()).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Verify security answer
+    if not user.security_answer_hash or not user.security_answer_salt:
+        raise HTTPException(status_code=400, detail="No security question set for this account")
+
+    if not verify_password(req.security_answer.lower().strip(), user.security_answer_hash, user.security_answer_salt):
+        raise HTTPException(status_code=401, detail="Incorrect security answer")
+
+    # Update password
+    new_hash, new_salt = hash_password(req.new_password)
+    user.password_hash = new_hash
+    user.password_salt = new_salt
+    db.commit()
+
+    return {"message": "Password reset successfully. You can now sign in with your new password."}
+
+@app.get("/auth/me")
+def get_me(authorization: str = Header(None), db: Session = Depends(get_db)):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    token = authorization.replace("Bearer ", "")
+    data = decode_token(token)
+    if not data:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user = db.query(User).filter(User.id == data["user_id"]).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "full_name": user.full_name,
+        "role": user.role,
+        "created_at": str(user.created_at),
+        "last_login": str(user.last_login) if user.last_login else None,
+    }
+
+@app.get("/auth/security-question/{username}")
+def get_security_question(username: str, db: Session = Depends(get_db)):
+    """Get the security question for a user (used during password reset)."""
+    user = db.query(User).filter(User.username == username.lower().strip()).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"security_question": user.security_question}
+
+# ── Scan Request/Response models ────────────────────────────────────────────
 class ScanRequest(BaseModel):
     hosts: List[str]        # list of domains to scan
     port: Optional[int] = 443
@@ -75,12 +251,24 @@ def save_to_db(data: dict, db: Session):
 
 # ── ROUTES ─────────────────────────────────────────────────────────────────
 
+# scanning the link subdomain
+
+from scanner import scan_host, scan_with_subdomains
+
+class SubdomainRequest(BaseModel):
+    host: str
+
+@app.post("/scan-subdomains")
+def scan_subdomains_api(req: SubdomainRequest):
+    return scan_with_subdomains(req.host)
+
 # 1. Health check
 @app.get("/")
 def root():
     return {"status": "QuantScan API running", "version": "1.0.0"}
 
 # 2. Scan one or multiple hosts
+
 @app.post("/scan")
 def scan(request: ScanRequest, db: Session = Depends(get_db)):
     results = []
@@ -88,17 +276,18 @@ def scan(request: ScanRequest, db: Session = Depends(get_db)):
 
     for host in request.hosts:
         host = host.strip().lower()
-        # Remove https:// or http:// if user typed it
         host = host.replace("https://", "").replace("http://", "").split("/")[0]
 
-        print(f"🔍 Scanning {host}...")
-        data = scan_host(host, request.port)
+        # ✅ Just scan the entered host directly — no subdomain expansion
+        print(f"[SCAN] Scanning {host}...")
+        data = scan_host(host)
 
         if data.get("error"):
             errors.append({"host": host, "error": data["error"]})
         else:
             record = save_to_db(data, db)
             results.append(format_result(record))
+       
 
     return {
         "message": f"Scanned {len(results)} hosts successfully",
