@@ -13,13 +13,14 @@ from database import get_db, create_tables, ScanResult, User, hash_password, ver
 app = FastAPI(title="QuantScan API", version="1.0.0")
 
 # Allow frontend to talk to backend
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], # In production, replace with your actual frontend Vercel URL
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # Create DB tables on startup
 @app.on_event("startup")
 def startup():
